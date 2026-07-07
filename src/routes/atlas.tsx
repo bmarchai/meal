@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import AtlasGlobe from "@/components/AtlasGlobe";
 import { Button } from "@/components/ui/button";
@@ -80,6 +80,27 @@ type RaceEvent = {
   distanceKm: number;
   date: string | null;
   url: string;
+};
+
+type UserEvent = {
+  id: string;
+  created_by: string;
+  name: string;
+  description: string | null;
+  event_date: string;
+  start_lat: number;
+  start_lng: number;
+  location_label: string;
+  route_id: string | null;
+  capacity: number | null;
+  is_public: boolean;
+};
+
+type EventRsvp = {
+  event_id: string;
+  user_id: string;
+  status: "going" | "interested" | "waitlist";
+  finish_time_min: number | null;
 };
 
 const WEATHER_CODES: Record<number, string> = {
@@ -478,6 +499,35 @@ function AtlasPage() {
   const [authMsg, setAuthMsg] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
 
+  // ── Cross-origin session bridge ──────────────────────────────────────
+  // Atlas is embedded via iframe inside Muscle Selector, on a different
+  // origin. Supabase sessions live in localStorage, which is scoped per
+  // origin — being signed in on the parent page doesn't carry over here
+  // automatically, even though it's the same Supabase project. The parent
+  // posts its session tokens once this iframe is ready; we just hydrate.
+  useEffect(() => {
+    const ALLOWED_PARENT_ORIGINS = [
+      "https://meal.bmarchai.com",
+      "https://meal.breelaun.workers.dev",
+      "http://localhost:3000",
+    ];
+    const onMessage = (e: MessageEvent) => {
+      if (!ALLOWED_PARENT_ORIGINS.includes(e.origin)) return;
+      if (e.data?.type !== "atlas:auth-session") return;
+      const { access_token, refresh_token } = e.data;
+      if (access_token && refresh_token) {
+        supabase.auth.setSession({ access_token, refresh_token });
+      }
+    };
+    window.addEventListener("message", onMessage);
+    // Ping the parent in case it loaded before we attached this listener —
+    // it replies with the session if the user's already signed in there.
+    if (window.self !== window.top) {
+      window.parent.postMessage({ type: "atlas:ready" }, "*");
+    }
+    return () => window.removeEventListener("message", onMessage);
+  }, []);
+
   const submitAuth = async () => {
     if (!authEmail.trim() || authPass.length < 8) {
       setAuthMsg("Email + password (min 8 chars) required.");
@@ -516,6 +566,7 @@ function AtlasPage() {
   const [shareMsg, setShareMsg] = useState("");
   const [shareUrl, setShareUrl] = useState("");
   const [forkedFromId, setForkedFromId] = useState<string | null>(null);
+  const [sharedRouteId, setSharedRouteId] = useState<string | null>(null);
 
   // If we arrived here via "Use this route →" on a shared-route page,
   // sessionStorage carries the route data across the navigation — load it
@@ -546,7 +597,7 @@ function AtlasPage() {
     setShareBusy(true);
     setShareMsg("");
     const slug = genSlug();
-    const { error } = await supabase.from("shared_routes").insert({
+    const { data, error } = await supabase.from("shared_routes").insert({
       user_id: user.id,
       slug,
       title: `${start.label} → ${end.label}`,
@@ -564,11 +615,154 @@ function AtlasPage() {
       elev_loss_m: Math.round(stats.loss),
       est_time_min: Math.round(stats.time),
       forked_from: forkedFromId,
-    });
+    }).select("id").single();
     setShareBusy(false);
     if (error) { setShareMsg(error.message); return; }
+    setSharedRouteId(data.id);
     setShareUrl(`${window.location.origin}/atlas/share/${slug}`);
     setShareOpen(true);
+  };
+
+  // ── Marathons / Events (user-created) ───────────────────────────────
+  // Distinct from `events` (the read-only Wikidata "nearby events" panel
+  // above) — these are events people actually create and RSVP to here.
+  const [showUserEvents, setShowUserEvents] = useState(false);
+  const [userEvents, setUserEvents] = useState<UserEvent[]>([]);
+  const [loadingUserEvents, setLoadingUserEvents] = useState(false);
+  const [myRsvps, setMyRsvps] = useState<Record<string, EventRsvp>>({});
+
+  const [createEventOpen, setCreateEventOpen] = useState(false);
+  const [evName, setEvName] = useState("");
+  const [evDescription, setEvDescription] = useState("");
+  const [evDate, setEvDate] = useState("");
+  const [evCapacity, setEvCapacity] = useState("");
+  const [evBusy, setEvBusy] = useState(false);
+  const [evMsg, setEvMsg] = useState("");
+
+  const [leaderboardEvent, setLeaderboardEvent] = useState<UserEvent | null>(null);
+  const [leaderboardRows, setLeaderboardRows] = useState<(EventRsvp & { email?: string })[]>([]);
+  const [finishTimeInput, setFinishTimeInput] = useState("");
+
+  const loadUserEvents = async () => {
+    if (loadingUserEvents) return;
+    setLoadingUserEvents(true);
+    const { data, error } = await supabase
+      .from("user_events")
+      .select("*")
+      .gte("event_date", new Date(Date.now() - 1000 * 60 * 60 * 24 * 2).toISOString().slice(0, 10))
+      .order("event_date", { ascending: true })
+      .limit(100);
+    setLoadingUserEvents(false);
+    if (error || !data) return;
+    const mid = start && end
+      ? { lat: (start.lat + end.lat) / 2, lng: (start.lng + end.lng) / 2 }
+      : start || end || null;
+    const rows = data as UserEvent[];
+    const sorted = mid
+      ? [...rows].sort(
+          (a, b) =>
+            haversine(mid, { lat: a.start_lat, lng: a.start_lng }) -
+            haversine(mid, { lat: b.start_lat, lng: b.start_lng }),
+        )
+      : rows;
+    setUserEvents(sorted);
+    if (user) {
+      const { data: rsvps } = await supabase
+        .from("event_rsvps")
+        .select("*")
+        .eq("user_id", user.id)
+        .in("event_id", sorted.map((e) => e.id));
+      if (rsvps) {
+        const map: Record<string, EventRsvp> = {};
+        for (const r of rsvps as EventRsvp[]) map[r.event_id] = r;
+        setMyRsvps(map);
+      }
+    }
+  };
+
+  const createEvent = async () => {
+    if (!user) { setAuthOpen(true); return; }
+    if (!start) { setEvMsg("Set a start point on the map first — that becomes the event location."); return; }
+    if (!evName.trim() || !evDate) { setEvMsg("Name and date are required."); return; }
+    setEvBusy(true);
+    setEvMsg("");
+    const { error } = await supabase.from("user_events").insert({
+      created_by: user.id,
+      name: evName.trim(),
+      description: evDescription.trim() || null,
+      event_date: evDate,
+      start_lat: start.lat,
+      start_lng: start.lng,
+      location_label: start.label,
+      route_id: sharedRouteId,
+      capacity: evCapacity ? Number(evCapacity) : null,
+      is_public: true,
+    });
+    setEvBusy(false);
+    if (error) { setEvMsg(error.message); return; }
+    setCreateEventOpen(false);
+    setEvName(""); setEvDescription(""); setEvDate(""); setEvCapacity("");
+    loadUserEvents();
+  };
+
+  const rsvp = async (ev: UserEvent, status: EventRsvp["status"]) => {
+    if (!user) { setAuthOpen(true); return; }
+    // Simple capacity check — count current "going" RSVPs before allowing
+    // another one; ties go to whoever's request lands first.
+    if (status === "going" && ev.capacity != null) {
+      const { count } = await supabase
+        .from("event_rsvps")
+        .select("*", { count: "exact", head: true })
+        .eq("event_id", ev.id)
+        .eq("status", "going");
+      if ((count ?? 0) >= ev.capacity) status = "waitlist";
+    }
+    const { error } = await supabase
+      .from("event_rsvps")
+      .upsert({ event_id: ev.id, user_id: user.id, status }, { onConflict: "event_id,user_id" });
+    if (!error) {
+      setMyRsvps((m) => ({ ...m, [ev.id]: { event_id: ev.id, user_id: user.id, status, finish_time_min: null } }));
+    }
+  };
+
+  const openLeaderboard = async (ev: UserEvent) => {
+    setLeaderboardEvent(ev);
+    const { data } = await supabase
+      .from("event_rsvps")
+      .select("*")
+      .eq("event_id", ev.id)
+      .not("finish_time_min", "is", null)
+      .order("finish_time_min", { ascending: true });
+    setLeaderboardRows((data as EventRsvp[]) || []);
+  };
+
+  const submitFinishTime = async () => {
+    if (!user || !leaderboardEvent || !finishTimeInput) return;
+    const mins = Number(finishTimeInput);
+    if (!mins || mins <= 0) return;
+    await supabase
+      .from("event_rsvps")
+      .upsert(
+        { event_id: leaderboardEvent.id, user_id: user.id, status: "going", finish_time_min: mins },
+        { onConflict: "event_id,user_id" },
+      );
+    setFinishTimeInput("");
+    openLeaderboard(leaderboardEvent);
+  };
+
+  // "Train for this event" — bridges into Muscle Selector's Race Plan
+  // wizard. Atlas doesn't own that logic, so it just asks the parent
+  // window to open it, pre-filled with this event's date. Standalone
+  // visits (not inside the iframe) get a plain heads-up instead.
+  const trainForEvent = (ev: UserEvent) => {
+    if (window.self !== window.top) {
+      window.parent.postMessage(
+        { type: "atlas:train-for-event", raceDate: ev.event_date, eventName: ev.name },
+        "*",
+      );
+    } else {
+      alert("Open Atlas inside Muscle Selector to build a training plan for this event.");
+    }
   };
 
   const openSavePlan = async () => {
@@ -1074,6 +1268,28 @@ ${elevation
 
   return (
     <main className="min-h-screen" style={{ background: "var(--paper-deep)" }}>
+      <header
+        className="border-b border-foreground/15 px-6 py-6 text-center"
+        style={{ background: "var(--paper)" }}
+      >
+        <p className="text-xs uppercase tracking-[0.4em] text-foreground/60">
+          Atlas — Plate II
+        </p>
+        <h1
+          className="mt-2 font-serif text-3xl md:text-5xl font-bold tracking-tight"
+          style={{ fontFamily: "'Cormorant Garamond', 'Times New Roman', serif" }}
+        >
+          The World Route Atlas
+        </h1>
+        <p className="mt-1 text-sm italic text-foreground/70">
+          Plan runs, marathons, triathlons & rides · path · distance · elevation
+        </p>
+        <p className="mt-3 text-xs">
+          <Link to="/" className="underline text-foreground/70 hover:text-foreground">
+            ← Back to Anatomy Atlas
+          </Link>
+        </p>
+      </header>
 
       <section className="mx-auto max-w-[1600px] px-4 py-6">
         {/* Search bars */}
@@ -1693,6 +1909,84 @@ ${elevation
                 </ul>
               )}
 
+              {/* Marathons & Events — user-created, distinct from the Wikidata panel above */}
+              <button
+                type="button"
+                onClick={() => {
+                  const next = !showUserEvents;
+                  setShowUserEvents(next);
+                  if (next && userEvents.length === 0) loadUserEvents();
+                }}
+                className="mt-2 flex w-full items-center justify-between rounded border border-foreground/20 px-3 py-2 text-sm hover:bg-foreground/5"
+              >
+                <span className="font-semibold">🏁 Marathons &amp; Events</span>
+                <span>{showUserEvents ? "▲" : "▼"}</span>
+              </button>
+              {showUserEvents && (
+                <div className="mt-2 space-y-2 rounded border border-foreground/10 p-2 text-xs">
+                  <Button
+                    size="sm"
+                    onClick={() => setCreateEventOpen(true)}
+                    disabled={!start}
+                    title={!start ? "Set a start point on the map first" : "Create an event at this location"}
+                  >
+                    + Create event here
+                  </Button>
+                  {loadingUserEvents && <p className="italic text-foreground/50">Loading events…</p>}
+                  {!loadingUserEvents && userEvents.length === 0 && (
+                    <p className="italic text-foreground/50">No upcoming events yet — be the first to create one.</p>
+                  )}
+                  <ul className="max-h-72 space-y-2 overflow-y-auto">
+                    {userEvents.map((ev) => {
+                      const mine = myRsvps[ev.id];
+                      const isPast = new Date(ev.event_date) < new Date();
+                      return (
+                        <li key={ev.id} className="rounded border border-foreground/10 p-2">
+                          <div className="flex items-start justify-between gap-2">
+                            <div>
+                              <p className="font-semibold">{ev.name}</p>
+                              <p className="text-foreground/50">
+                                {ev.event_date} · {ev.location_label}
+                              </p>
+                              {ev.description && <p className="mt-1 text-foreground/70">{ev.description}</p>}
+                            </div>
+                          </div>
+                          <div className="mt-2 flex flex-wrap gap-1.5">
+                            {!isPast && (
+                              <>
+                                <Button
+                                  size="sm"
+                                  variant={mine?.status === "going" ? "default" : "secondary"}
+                                  onClick={() => rsvp(ev, "going")}
+                                >
+                                  {mine?.status === "going" ? "✓ Going" : "Going"}
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant={mine?.status === "interested" ? "default" : "secondary"}
+                                  onClick={() => rsvp(ev, "interested")}
+                                >
+                                  Interested
+                                </Button>
+                                {mine?.status === "waitlist" && (
+                                  <span className="self-center text-foreground/50">On waitlist</span>
+                                )}
+                                <Button size="sm" variant="ghost" onClick={() => trainForEvent(ev)}>
+                                  🏋️ Train for this
+                                </Button>
+                              </>
+                            )}
+                            <Button size="sm" variant="ghost" onClick={() => openLeaderboard(ev)}>
+                              🏆 {isPast ? "Results" : "Leaderboard"}
+                            </Button>
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              )}
+
               <p className="mt-3 text-[10px] italic text-foreground/50">
                 News via GDELT · wildlife via GBIF · weather via Open-Meteo. Data refreshes daily when you reload.
               </p>
@@ -1837,6 +2131,85 @@ ${elevation
             <Button onClick={() => navigator.clipboard.writeText(shareUrl)}>Copy</Button>
           </div>
           {shareMsg && <p className="text-xs text-red-600">{shareMsg}</p>}
+        </DialogContent>
+      </Dialog>
+
+      {/* Create a user event (marathon, group run, etc.) at the current start point */}
+      <Dialog open={createEventOpen} onOpenChange={setCreateEventOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>🏁 Create Event</DialogTitle>
+            <DialogDescription>
+              {start ? `Location: ${start.label}` : "Set a start point on the map first."}
+              {sharedRouteId && " · This event will link to your currently shared route as its official course."}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div>
+              <label className="text-xs font-semibold uppercase tracking-wide text-foreground/60">Event name</label>
+              <Input value={evName} onChange={(e) => setEvName(e.target.value)} placeholder="Saturday Sunrise 10K" />
+            </div>
+            <div>
+              <label className="text-xs font-semibold uppercase tracking-wide text-foreground/60">Description (optional)</label>
+              <Input value={evDescription} onChange={(e) => setEvDescription(e.target.value)} placeholder="Casual group run, all paces welcome" />
+            </div>
+            <div className="flex gap-2">
+              <div className="flex-1">
+                <label className="text-xs font-semibold uppercase tracking-wide text-foreground/60">Date</label>
+                <Input type="date" value={evDate} onChange={(e) => setEvDate(e.target.value)} />
+              </div>
+              <div className="flex-1">
+                <label className="text-xs font-semibold uppercase tracking-wide text-foreground/60">Capacity (optional)</label>
+                <Input type="number" min="1" value={evCapacity} onChange={(e) => setEvCapacity(e.target.value)} placeholder="Unlimited" />
+              </div>
+            </div>
+            {evMsg && <p className="text-xs text-red-600">{evMsg}</p>}
+          </div>
+          <DialogFooter>
+            <Button onClick={createEvent} disabled={evBusy}>
+              {evBusy ? "Creating…" : "Create event"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Leaderboard / results — RSVP list pre-event, finish times post-event */}
+      <Dialog open={!!leaderboardEvent} onOpenChange={(o) => !o && setLeaderboardEvent(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>🏆 {leaderboardEvent?.name}</DialogTitle>
+            <DialogDescription>
+              {leaderboardEvent && new Date(leaderboardEvent.event_date) < new Date()
+                ? "Finishing times, fastest first."
+                : "Log your time once the event's happened to appear on the leaderboard."}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            {leaderboardRows.length === 0 && (
+              <p className="text-sm italic text-foreground/50">No times logged yet.</p>
+            )}
+            <ul className="max-h-56 space-y-1 overflow-y-auto text-sm">
+              {leaderboardRows.map((r, i) => (
+                <li key={r.user_id} className="flex justify-between border-b border-foreground/10 pb-1 last:border-0">
+                  <span>#{i + 1} {r.user_id === user?.id ? "You" : r.user_id.slice(0, 8)}</span>
+                  <span className="font-semibold">{r.finish_time_min} min</span>
+                </li>
+              ))}
+            </ul>
+            {leaderboardEvent && new Date(leaderboardEvent.event_date) < new Date() && (
+              <div className="flex gap-2 pt-2">
+                <Input
+                  type="number"
+                  placeholder="Your finish time (min)"
+                  value={finishTimeInput}
+                  onChange={(e) => setFinishTimeInput(e.target.value)}
+                />
+                <Button onClick={submitFinishTime} disabled={!user}>
+                  Log time
+                </Button>
+              </div>
+            )}
+          </div>
         </DialogContent>
       </Dialog>
     </main>
