@@ -1,4 +1,4 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import AtlasGlobe from "@/components/AtlasGlobe";
 import { Button } from "@/components/ui/button";
@@ -1268,28 +1268,6 @@ ${elevation
 
   return (
     <main className="min-h-screen" style={{ background: "var(--paper-deep)" }}>
-      <header
-        className="border-b border-foreground/15 px-6 py-6 text-center"
-        style={{ background: "var(--paper)" }}
-      >
-        <p className="text-xs uppercase tracking-[0.4em] text-foreground/60">
-          Atlas — Plate II
-        </p>
-        <h1
-          className="mt-2 font-serif text-3xl md:text-5xl font-bold tracking-tight"
-          style={{ fontFamily: "'Cormorant Garamond', 'Times New Roman', serif" }}
-        >
-          The World Route Atlas
-        </h1>
-        <p className="mt-1 text-sm italic text-foreground/70">
-          Plan runs, marathons, triathlons & rides · path · distance · elevation
-        </p>
-        <p className="mt-3 text-xs">
-          <Link to="/" className="underline text-foreground/70 hover:text-foreground">
-            ← Back to Anatomy Atlas
-          </Link>
-        </p>
-      </header>
 
       <section className="mx-auto max-w-[1600px] px-4 py-6">
         {/* Search bars */}
