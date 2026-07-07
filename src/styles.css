@@ -67,7 +67,7 @@
   --foreground: oklch(0.22 0.03 40);
   --ink: oklch(0.2 0.025 40);
   --paper: oklch(0.97 0.018 85);
-  --paper-deep: oklch(0.93 0.025 80);
+  --paper-deep: oklch(0 0 0);
   --accent-rust: oklch(0.5 0.13 35);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.129 0.042 264.695);
