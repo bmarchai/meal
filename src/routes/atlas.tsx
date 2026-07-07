@@ -510,6 +510,67 @@ function AtlasPage() {
   const [saveBusy, setSaveBusy] = useState(false);
   const [saveMsg, setSaveMsg] = useState("");
 
+  // ── Route sharing (public link + fork) ──────────────────────────────
+  const [shareOpen, setShareOpen] = useState(false);
+  const [shareBusy, setShareBusy] = useState(false);
+  const [shareMsg, setShareMsg] = useState("");
+  const [shareUrl, setShareUrl] = useState("");
+  const [forkedFromId, setForkedFromId] = useState<string | null>(null);
+
+  // If we arrived here via "Use this route →" on a shared-route page,
+  // sessionStorage carries the route data across the navigation — load it
+  // once, then clear it so a refresh doesn't re-trigger the fork.
+  useEffect(() => {
+    const raw = sessionStorage.getItem("atlas:fork");
+    if (!raw) return;
+    sessionStorage.removeItem("atlas:fork");
+    try {
+      const f = JSON.parse(raw);
+      setStart({ label: f.start_label, lat: f.start_lat, lng: f.start_lng });
+      setEnd({ label: f.end_label, lat: f.end_lat, lng: f.end_lng });
+      setRoutePath(f.route_path || []);
+      setElevation(f.elevation || []);
+      if (f.activity) setActivity(f.activity);
+      setForkedFromId(f.id ?? null);
+    } catch {
+      // malformed session data — ignore, user just starts from a blank planner
+    }
+  }, []);
+
+  const genSlug = () =>
+    Math.random().toString(36).slice(2, 8) + Math.random().toString(36).slice(2, 4);
+
+  const shareRoute = async () => {
+    if (!user) { setAuthOpen(true); return; }
+    if (!start || !end || elevation.length < 2) return;
+    setShareBusy(true);
+    setShareMsg("");
+    const slug = genSlug();
+    const { error } = await supabase.from("shared_routes").insert({
+      user_id: user.id,
+      slug,
+      title: `${start.label} → ${end.label}`,
+      activity,
+      start_label: start.label,
+      start_lat: start.lat,
+      start_lng: start.lng,
+      end_label: end.label,
+      end_lat: end.lat,
+      end_lng: end.lng,
+      route_path: routePath,
+      elevation,
+      distance_km: +(stats.dist / 1000).toFixed(3),
+      elev_gain_m: Math.round(stats.gain),
+      elev_loss_m: Math.round(stats.loss),
+      est_time_min: Math.round(stats.time),
+      forked_from: forkedFromId,
+    });
+    setShareBusy(false);
+    if (error) { setShareMsg(error.message); return; }
+    setShareUrl(`${window.location.origin}/atlas/share/${slug}`);
+    setShareOpen(true);
+  };
+
   const openSavePlan = async () => {
     if (!user) { setAuthOpen(true); return; }
     setSavePlanOpen(true);
@@ -1154,6 +1215,15 @@ ${elevation
               >
                 📅 Save to Race Plan
               </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={shareRoute}
+                disabled={elevation.length < 2 || shareBusy}
+                title="Get a shareable link others can view and fork"
+              >
+                {shareBusy ? "Sharing…" : "🔗 Share route"}
+              </Button>
               {authReady && (
                 user ? (
                   <Button size="sm" variant="ghost" onClick={() => supabase.auth.signOut()}>
@@ -1772,6 +1842,23 @@ ${elevation
               </Button>
             </DialogFooter>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Share route — public link + fork */}
+      <Dialog open={shareOpen} onOpenChange={setShareOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>🔗 Route shared</DialogTitle>
+            <DialogDescription>
+              Anyone with this link can view the route and fork it into their own planner — no account required to view.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex gap-2">
+            <Input readOnly value={shareUrl} onFocus={(e) => e.currentTarget.select()} />
+            <Button onClick={() => navigator.clipboard.writeText(shareUrl)}>Copy</Button>
+          </div>
+          {shareMsg && <p className="text-xs text-red-600">{shareMsg}</p>}
         </DialogContent>
       </Dialog>
     </main>
