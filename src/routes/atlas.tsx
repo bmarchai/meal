@@ -552,7 +552,10 @@ function AtlasPage() {
 
   // ── Save to Race Plan ────────────────────────────────────────────────
   type RacePlanWeek = { weekNum: number; days: { day?: string }[] };
+  type RacePlanRow = { id: string; race_id: string; inputs: any; plan: { weeks?: RacePlanWeek[] } };
   const [savePlanOpen, setSavePlanOpen] = useState(false);
+  const [myPlans, setMyPlans] = useState<RacePlanRow[]>([]);
+  const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null);
   const [planWeeks, setPlanWeeks] = useState<RacePlanWeek[] | null>(null);
   const [planLoading, setPlanLoading] = useState(false);
   const [saveWeekIdx, setSaveWeekIdx] = useState(0);
@@ -765,33 +768,54 @@ function AtlasPage() {
     }
   };
 
+  // Muscle Selector moved from a single-row `user_race_plans` table to a
+  // multi-plan `race_plans` table (one row per saved plan, not one per
+  // user) — this used to query the old table, which either doesn't exist
+  // anymore or never reflects what's actually in Muscle Selector's "My
+  // Plans" list. Pull every plan the user has and let them pick which one
+  // this route attaches to, same as Muscle Selector's own picker.
   const openSavePlan = async () => {
     if (!user) { setAuthOpen(true); return; }
     setSavePlanOpen(true);
     setSaveMsg("");
     setPlanLoading(true);
     const { data, error } = await supabase
-      .from("user_race_plans")
-      .select("plan")
+      .from("race_plans")
+      .select("id, race_id, inputs, plan")
       .eq("user_id", user.id)
-      .maybeSingle();
+      .order("updated_at", { ascending: false });
     setPlanLoading(false);
-    if (error || !data?.plan?.weeks?.length) {
+    if (error || !data?.length) {
+      setMyPlans([]);
+      setSelectedPlanId(null);
       setPlanWeeks(null);
       return;
     }
-    setPlanWeeks(data.plan.weeks);
+    const rows = data as RacePlanRow[];
+    setMyPlans(rows);
+    const first = rows[0];
+    setSelectedPlanId(first.id);
+    setPlanWeeks(first.plan?.weeks?.length ? first.plan.weeks : null);
+    setSaveWeekIdx(0);
+    setSaveDayIdx(0);
+  };
+
+  const selectPlan = (planId: string) => {
+    setSelectedPlanId(planId);
+    const p = myPlans.find((mp) => mp.id === planId);
+    setPlanWeeks(p?.plan?.weeks?.length ? p.plan.weeks : null);
     setSaveWeekIdx(0);
     setSaveDayIdx(0);
   };
 
   const saveRouteToPlan = async () => {
-    if (!user || !start || !end || elevation.length < 2) return;
+    if (!user || !start || !end || elevation.length < 2 || !selectedPlanId) return;
     setSaveBusy(true);
     setSaveMsg("");
     const { error } = await supabase.from("race_plan_routes").upsert(
       {
         user_id: user.id,
+        plan_id: selectedPlanId,
         week_idx: saveWeekIdx,
         day_idx: saveDayIdx,
         title: `${start.label} → ${end.label}`,
@@ -809,7 +833,7 @@ function AtlasPage() {
         est_time_min: Math.round(stats.time),
         updated_at: new Date().toISOString(),
       },
-      { onConflict: "user_id,week_idx,day_idx" },
+      { onConflict: "user_id,plan_id,week_idx,day_idx" },
     );
     setSaveBusy(false);
     if (error) { setSaveMsg(error.message); return; }
@@ -2042,50 +2066,70 @@ ${elevation
           <DialogHeader>
             <DialogTitle>📅 Save to Race Plan</DialogTitle>
             <DialogDescription>
-              Attach this route to a day in your Muscle Selector Race Plan.
+              Attach this route to a day in one of your Muscle Selector Race Plans.
             </DialogDescription>
           </DialogHeader>
-          {planLoading && <p className="text-sm text-foreground/60">Loading your Race Plan…</p>}
-          {!planLoading && !planWeeks && (
+          {planLoading && <p className="text-sm text-foreground/60">Loading your Race Plans…</p>}
+          {!planLoading && myPlans.length === 0 && (
             <p className="text-sm text-foreground/70">
-              You don't have an active Race Plan yet — build one in Muscle Selector first, then come back here to attach routes to it.
+              You don't have any Race Plans yet — build one in Muscle Selector first, then come back here to attach routes to it.
             </p>
           )}
-          {!planLoading && planWeeks && (
+          {!planLoading && myPlans.length > 0 && (
             <div className="space-y-3">
-              <div className="flex gap-2">
-                <div className="flex-1">
-                  <label className="text-xs font-semibold uppercase tracking-wide text-foreground/60">Week</label>
-                  <Select value={String(saveWeekIdx)} onValueChange={(v) => { setSaveWeekIdx(Number(v)); setSaveDayIdx(0); }}>
+              {myPlans.length > 1 && (
+                <div>
+                  <label className="text-xs font-semibold uppercase tracking-wide text-foreground/60">Plan</label>
+                  <Select value={selectedPlanId ?? ""} onValueChange={selectPlan}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>
-                      {planWeeks.map((w, i) => (
-                        <SelectItem key={i} value={String(i)}>Week {w.weekNum}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="flex-1">
-                  <label className="text-xs font-semibold uppercase tracking-wide text-foreground/60">Day</label>
-                  <Select value={String(saveDayIdx)} onValueChange={(v) => setSaveDayIdx(Number(v))}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      {planWeeks[saveWeekIdx]?.days.map((_, i) => (
-                        <SelectItem key={i} value={String(i)}>
-                          {["Mon","Tue","Wed","Thu","Fri","Sat","Sun"][i] ?? `Day ${i + 1}`}
+                      {myPlans.map((p) => (
+                        <SelectItem key={p.id} value={p.id}>
+                          {p.race_id || "Race Plan"}
+                          {p.inputs?.raceDate ? ` — ${p.inputs.raceDate}` : ""}
                         </SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
                 </div>
-              </div>
+              )}
+              {planWeeks ? (
+                <div className="flex gap-2">
+                  <div className="flex-1">
+                    <label className="text-xs font-semibold uppercase tracking-wide text-foreground/60">Week</label>
+                    <Select value={String(saveWeekIdx)} onValueChange={(v) => { setSaveWeekIdx(Number(v)); setSaveDayIdx(0); }}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {planWeeks.map((w, i) => (
+                          <SelectItem key={i} value={String(i)}>Week {w.weekNum}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="flex-1">
+                    <label className="text-xs font-semibold uppercase tracking-wide text-foreground/60">Day</label>
+                    <Select value={String(saveDayIdx)} onValueChange={(v) => setSaveDayIdx(Number(v))}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {planWeeks[saveWeekIdx]?.days.map((_, i) => (
+                          <SelectItem key={i} value={String(i)}>
+                            {["Mon","Tue","Wed","Thu","Fri","Sat","Sun"][i] ?? `Day ${i + 1}`}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+              ) : (
+                <p className="text-sm text-foreground/70">This plan doesn't have any weeks yet.</p>
+              )}
               <p className="text-xs text-foreground/60">
                 {start?.label} → {end?.label} · {(stats.dist / 1000).toFixed(1)} km
               </p>
               {saveMsg && <p className="text-xs">{saveMsg}</p>}
             </div>
           )}
-          {!planLoading && planWeeks && (
+          {!planLoading && myPlans.length > 0 && planWeeks && (
             <DialogFooter>
               <Button onClick={saveRouteToPlan} disabled={saveBusy}>
                 {saveBusy ? "Saving…" : "Save route to this day"}
