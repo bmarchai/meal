@@ -1359,7 +1359,7 @@ ${elevation
                 </SelectContent>
               </Select>
             </div>
-            <div className="ml-auto flex gap-2">
+            <div className="flex w-full flex-wrap gap-2 sm:w-auto sm:ml-auto sm:justify-end">
               <Button size="sm" variant="outline" onClick={swapEnds} disabled={!start && !end}>
                 ⇅ Swap
               </Button>
